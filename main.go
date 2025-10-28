@@ -327,7 +327,7 @@ var pageTmpl = template.Must(template.New("page").Parse(`<!doctype html>
 <style>
 body{background:#000;color:#0f0;font-family:'Fira Code',monospace;margin:0;padding:20px;}
 h2{color:#0f0;}
-button{font-family:'Fira Code',monospace;background:#000;color:#0f0;border:1px solid #0f0;border-radius:5px;padding:8px 14px;margin-top:6px}
+	button{width: 100%;font-family:'Fira Code',monospace;background:#000;color:#0f0;border:1px solid #0f0;border-radius:5px;padding:8px 14px;margin-top:6px}
 button:hover{background:#0f0;color:#000;cursor:pointer}
 pre{white-space:pre-wrap;word-break:break-word;background:#000;padding:10px;border:1px solid #0f0;border-radius:5px;box-shadow:0 0 8px #0f0;}
 a{color:#0f0;text-decoration:none}
@@ -342,7 +342,7 @@ a:hover{text-decoration:underline}
 <a href="/logout"><button>logout</button></a>
 </div>
 
-<div style="margin:15px 0;">
+	<div style="margin:15px 0; display: flex; justify-content: space-between; gap: 20px;">
 <button onclick="pasteFromClipboard()">📥 Paste from Clipboard</button>
 <button onclick="copyCurrent()">📋 Copy current text</button>
 </div>
@@ -365,6 +365,7 @@ async function pasteFromClipboard(){
     }
     if(!text)return;
     await fetch("/api/set",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text})});
+    document.getElementById("current").textContent=text;
   }catch(e){alert("Clipboard read failed: "+e);}
 }
 
