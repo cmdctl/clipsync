@@ -168,11 +168,14 @@ func setHandler(w http.ResponseWriter, r *http.Request) {
 func eventsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "SSE unsupported", 500)
 		return
 	}
+	flusher.Flush()
 	clientCh := make(chan []byte, 4)
 	go func() {
 		for msg := range sseCh {
