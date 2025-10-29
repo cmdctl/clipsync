@@ -21,7 +21,7 @@ type ClipItem struct {
 
 var (
 	lastItem  = ClipItem{}
-	sseCh     = make(chan []byte, 16)
+	sseCh     = make(chan []byte, 256)
 	serverPwd string
 )
 
@@ -192,6 +192,7 @@ func setHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func eventsHandler(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	log.Printf("EVENTS: New SSE connection request from %s", r.RemoteAddr)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -205,8 +206,8 @@ func eventsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	flusher.Flush()
 	log.Printf("EVENTS: SSE headers set and flushed for client %s", r.RemoteAddr)
-	
-	clientCh := make(chan []byte, 4)
+
+	clientCh := make(chan []byte, 256) // Increased buffer size to reduce message drops
 	go func() {
 		log.Printf("EVENTS: Starting SSE message relay goroutine for client %s", r.RemoteAddr)
 		for msg := range sseCh {
@@ -214,14 +215,16 @@ func eventsHandler(w http.ResponseWriter, r *http.Request) {
 			select {
 			case clientCh <- msg:
 				log.Printf("EVENTS: Successfully queued message to client channel for %s", r.RemoteAddr)
+			case <-ctx.Done():
+				log.Printf("EVENTS: Context cancelled, exiting relay goroutine for client %s", r.RemoteAddr)
+				return
 			default:
 				log.Printf("EVENTS: Client channel full, dropping message for %s", r.RemoteAddr)
 			}
 		}
 		log.Printf("EVENTS: SSE message relay goroutine ending for client %s", r.RemoteAddr)
 	}()
-	
-	ctx := r.Context()
+
 	log.Printf("EVENTS: Starting SSE message loop for client %s", r.RemoteAddr)
 	for {
 		select {
@@ -296,7 +299,7 @@ func sseListen(server, password string) error {
 		log.Printf("SSE: Closing connection to server %s", server)
 		resp.Body.Close()
 	}()
-	
+
 	buf := make([]byte, 4096)
 	for {
 		log.Printf("SSE: Reading data from server %s", server)
