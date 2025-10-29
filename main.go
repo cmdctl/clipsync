@@ -78,31 +78,45 @@ func runServer(addr string) {
 
 func browserAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("AUTH: Browser auth check for %s accessing %s", r.RemoteAddr, r.URL.Path)
 		if !isAuthorized(r) {
+			log.Printf("AUTH: Browser auth failed for %s, redirecting to login", r.RemoteAddr)
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
+		log.Printf("AUTH: Browser auth succeeded for %s accessing %s", r.RemoteAddr, r.URL.Path)
 		next(w, r)
 	}
 }
 
 func apiAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("AUTH: API auth check for %s accessing %s", r.RemoteAddr, r.URL.Path)
 		if !isAuthorized(r) && !headerAuth(r) {
+			log.Printf("AUTH: API auth failed for %s accessing %s", r.RemoteAddr, r.URL.Path)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		log.Printf("AUTH: API auth succeeded for %s accessing %s", r.RemoteAddr, r.URL.Path)
 		next(w, r)
 	}
 }
 
 func isAuthorized(r *http.Request) bool {
 	c, err := r.Cookie("auth")
-	return err == nil && c.Value == "1"
+	if err != nil {
+		log.Printf("AUTH: No auth cookie found for %s: %v", r.RemoteAddr, err)
+		return false
+	}
+	authValid := c.Value == "1"
+	log.Printf("AUTH: Cookie auth check for %s: %v", r.RemoteAddr, authValid)
+	return authValid
 }
 
 func headerAuth(r *http.Request) bool {
-	return r.Header.Get("X-Auth") == serverPwd
+	headerAuth := r.Header.Get("X-Auth") == serverPwd
+	log.Printf("AUTH: Header auth check for %s: %v", r.RemoteAddr, headerAuth)
+	return headerAuth
 }
 
 func loginHandler(w http.ResponseWriter, r *http.Request) {
@@ -147,52 +161,78 @@ func getHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func setHandler(w http.ResponseWriter, r *http.Request) {
+	log.Printf("SET: Received set request from %s", r.RemoteAddr)
 	var body struct {
 		Text string `json:"text"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		log.Printf("SET: Failed to decode request body from %s: %v", r.RemoteAddr, err)
 		http.Error(w, "bad request", 400)
 		return
 	}
+	log.Printf("SET: Decoded body text from %s: %s", r.RemoteAddr, body.Text)
 	text := strings.TrimSpace(body.Text)
 	if text == "" {
+		log.Printf("SET: Empty text received from %s", r.RemoteAddr)
 		http.Error(w, "empty text", 400)
 		return
 	}
 	lastItem = ClipItem{Text: text, UpdatedAt: time.Now()}
+	log.Printf("SET: Updated lastItem with text: %s", text)
 	data, _ := json.Marshal(lastItem)
-	sseCh <- data
+	log.Printf("SET: Prepared JSON data to send to SSE channel: %s", string(data))
+	select {
+	case sseCh <- data:
+		log.Printf("SET: Successfully sent data to SSE channel from %s", r.RemoteAddr)
+	default:
+		log.Printf("SET: Failed to send data to SSE channel (channel full) from %s", r.RemoteAddr)
+	}
 	w.WriteHeader(204)
+	log.Printf("SET: Sent 204 response to %s", r.RemoteAddr)
 }
 
 func eventsHandler(w http.ResponseWriter, r *http.Request) {
+	log.Printf("EVENTS: New SSE connection request from %s", r.RemoteAddr)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 	flusher, ok := w.(http.Flusher)
 	if !ok {
+		log.Printf("EVENTS: SSE unsupported by client %s", r.RemoteAddr)
 		http.Error(w, "SSE unsupported", 500)
 		return
 	}
 	flusher.Flush()
+	log.Printf("EVENTS: SSE headers set and flushed for client %s", r.RemoteAddr)
+	
 	clientCh := make(chan []byte, 4)
 	go func() {
+		log.Printf("EVENTS: Starting SSE message relay goroutine for client %s", r.RemoteAddr)
 		for msg := range sseCh {
+			log.Printf("EVENTS: Received message from global SSE channel: %s", string(msg))
 			select {
 			case clientCh <- msg:
+				log.Printf("EVENTS: Successfully queued message to client channel for %s", r.RemoteAddr)
 			default:
+				log.Printf("EVENTS: Client channel full, dropping message for %s", r.RemoteAddr)
 			}
 		}
+		log.Printf("EVENTS: SSE message relay goroutine ending for client %s", r.RemoteAddr)
 	}()
+	
 	ctx := r.Context()
+	log.Printf("EVENTS: Starting SSE message loop for client %s", r.RemoteAddr)
 	for {
 		select {
 		case <-ctx.Done():
+			log.Printf("EVENTS: Context cancelled for client %s, connection closed", r.RemoteAddr)
 			return
 		case msg := <-clientCh:
+			log.Printf("EVENTS: Sending message to client %s: %s", r.RemoteAddr, string(msg))
 			fmt.Fprintf(w, "data: %s\n\n", msg)
 			flusher.Flush()
+			log.Printf("EVENTS: Message flushed to client %s", r.RemoteAddr)
 		}
 	}
 }
@@ -200,54 +240,86 @@ func eventsHandler(w http.ResponseWriter, r *http.Request) {
 // ======================= CLIENT =======================
 
 func runClient(server, password string) {
+	log.Printf("CLIENT: Starting client to connect to server %s", server)
 	go func() {
+		log.Printf("CLIENT: Starting SSE listener goroutine for server %s", server)
 		for {
+			log.Printf("CLIENT: Attempting to connect to SSE endpoint at %s", server)
 			err := sseListen(server, password)
-			log.Println("SSE error:", err)
+			log.Printf("CLIENT: SSE connection ended for %s with error: %v", server, err)
+			log.Printf("CLIENT: Waiting 2 seconds before reconnecting to %s", server)
 			time.Sleep(2 * time.Second)
 		}
 	}()
 
 	var last string
+	log.Printf("CLIENT: Starting clipboard monitoring loop for server %s", server)
 	for {
+		log.Printf("CLIENT: Checking clipboard content...")
 		txt, err := getClipboardText()
-		if err == nil && txt != "" && txt != last {
-			body, _ := json.Marshal(map[string]string{"text": txt})
-			req, _ := http.NewRequest("POST", server+"/api/set", bytes.NewReader(body))
-			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("X-Auth", password)
-			http.DefaultClient.Do(req)
-			last = txt
-			log.Println("Sent clipboard:", txt)
+		if err != nil {
+			log.Printf("CLIENT: Error getting clipboard text: %v", err)
+		} else {
+			log.Printf("CLIENT: Retrieved clipboard text: %s (length: %d)", txt, len(txt))
+			if txt != "" && txt != last {
+				log.Printf("CLIENT: Clipboard content changed from '%s' to '%s'", last, txt)
+				body, _ := json.Marshal(map[string]string{"text": txt})
+				req, _ := http.NewRequest("POST", server+"/api/set", bytes.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("X-Auth", password)
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					log.Printf("CLIENT: Failed to send clipboard to server %s: %v", server, err)
+				} else {
+					log.Printf("CLIENT: Sent clipboard to server %s, response status: %d", server, resp.StatusCode)
+					resp.Body.Close()
+				}
+				last = txt
+				log.Printf("CLIENT: Updated last clipboard value to: %s", txt)
+			}
 		}
 		time.Sleep(800 * time.Millisecond)
 	}
 }
 
 func sseListen(server, password string) error {
+	log.Printf("SSE: Initiating SSE connection to %s", server)
 	req, _ := http.NewRequest("GET", server+"/events", nil)
 	req.Header.Set("X-Auth", password)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		log.Printf("SSE: Failed to connect to server %s: %v", server, err)
 		return err
 	}
-	defer resp.Body.Close()
+	log.Printf("SSE: Connected to server %s, status: %d", server, resp.StatusCode)
+	defer func() {
+		log.Printf("SSE: Closing connection to server %s", server)
+		resp.Body.Close()
+	}()
+	
 	buf := make([]byte, 4096)
 	for {
+		log.Printf("SSE: Reading data from server %s", server)
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
+			log.Printf("SSE: Received %d bytes from server %s: %s", n, server, string(buf[:n]))
 			part := buf[:n]
 			for _, line := range strings.Split(string(part), "\n") {
 				if strings.HasPrefix(line, "data:") {
+					log.Printf("SSE: Processing data line: %s", line)
 					var it ClipItem
 					if json.Unmarshal([]byte(strings.TrimSpace(line[5:])), &it) == nil {
+						log.Printf("SSE: Successfully parsed ClipItem: %s", it.Text)
 						setClipboardText(it.Text)
-						log.Println("Received clipboard:", it.Text)
+						log.Printf("SSE: Set clipboard with received text: %s", it.Text)
+					} else {
+						log.Printf("SSE: Failed to unmarshal JSON: %s", strings.TrimSpace(line[5:]))
 					}
 				}
 			}
 		}
 		if err != nil {
+			log.Printf("SSE: Error reading from server %s: %v", server, err)
 			return err
 		}
 	}
@@ -256,37 +328,51 @@ func sseListen(server, password string) error {
 // ======================= CLIPBOARD =======================
 
 func getClipboardText() (string, error) {
+	log.Printf("CLIPBOARD: Attempting to get clipboard text")
 	cmds := [][]string{
 		{"wl-paste", "-n"},
 		{"xclip", "-o", "-selection", "clipboard"},
 		{"xsel", "--clipboard", "--output"},
 	}
-	for _, c := range cmds {
+	for i, c := range cmds {
+		log.Printf("CLIPBOARD: Trying clipboard command %d: %s", i+1, strings.Join(c, " "))
 		out, err := exec.Command(c[0], c[1:]...).Output()
 		if err == nil {
-			return string(out), nil
+			result := string(out)
+			log.Printf("CLIPBOARD: Successfully retrieved clipboard text: %s (length: %d)", result, len(result))
+			return result, nil
+		} else {
+			log.Printf("CLIPBOARD: Command %d failed: %s with error: %v", i+1, strings.Join(c, " "), err)
 		}
 	}
+	log.Printf("CLIPBOARD: All clipboard commands failed, returning error")
 	return "", fmt.Errorf("no clipboard tool found")
 }
 
 func setClipboardText(s string) error {
+	log.Printf("CLIPBOARD: Attempting to set clipboard text: %s (length: %d)", s, len(s))
 	cmds := [][]string{
 		{"wl-copy"},
 		{"xclip", "-selection", "clipboard"},
 		{"xsel", "--clipboard", "--input"},
 	}
-	for _, c := range cmds {
+	for i, c := range cmds {
+		log.Printf("CLIPBOARD: Trying clipboard command %d: %s", i+1, strings.Join(c, " "))
 		cmd := exec.Command(c[0], c[1:]...)
 		stdin, _ := cmd.StdinPipe()
 		go func() {
 			io.WriteString(stdin, s)
 			stdin.Close()
+			log.Printf("CLIPBOARD: Wrote text to stdin for command %d", i+1)
 		}()
 		if err := cmd.Run(); err == nil {
+			log.Printf("CLIPBOARD: Successfully set clipboard using command %d: %s", i+1, strings.Join(c, " "))
 			return nil
+		} else {
+			log.Printf("CLIPBOARD: Command %d failed: %s with error: %v", i+1, strings.Join(c, " "), err)
 		}
 	}
+	log.Printf("CLIPBOARD: All clipboard commands failed to set text: %s", s)
 	return fmt.Errorf("no clipboard backend found")
 }
 
