@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -20,9 +21,11 @@ type ClipItem struct {
 }
 
 var (
-	lastItem  = ClipItem{}
-	sseCh     = make(chan []byte, 256)
-	serverPwd string
+	lastItem     = ClipItem{}
+	clients      = make(map[chan []byte]bool)
+	broadcast    = make(chan []byte, 256)
+	serverPwd    string
+	clientsMutex sync.Mutex
 )
 
 func main() {
@@ -62,6 +65,23 @@ func usage() {
 // ======================= SERVER =======================
 
 func runServer(addr string) {
+	// Start the broadcast goroutine
+	go func() {
+		for message := range broadcast {
+			clientsMutex.Lock()
+			for clientCh := range clients {
+				// Send the message to each client's channel, but don't block if channel is full
+				select {
+				case clientCh <- message:
+					// Message sent successfully
+				default:
+					log.Printf("Broadcast: Client channel full, message dropped")
+				}
+			}
+			clientsMutex.Unlock()
+		}
+	}()
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/login", loginHandler)
@@ -181,12 +201,15 @@ func setHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("SET: Updated lastItem with text: %s", text)
 	data, _ := json.Marshal(lastItem)
 	log.Printf("SET: Prepared JSON data to send to SSE channel: %s", string(data))
+
+	// Send the message to the broadcast channel for all clients
 	select {
-	case sseCh <- data:
-		log.Printf("SET: Successfully sent data to SSE channel from %s", r.RemoteAddr)
+	case broadcast <- data:
+		log.Printf("SET: Successfully sent data to broadcast channel from %s", r.RemoteAddr)
 	default:
-		log.Printf("SET: Failed to send data to SSE channel (channel full) from %s", r.RemoteAddr)
+		log.Printf("SET: Failed to send data to broadcast channel (channel full) from %s", r.RemoteAddr)
 	}
+
 	w.WriteHeader(204)
 	log.Printf("SET: Sent 204 response to %s", r.RemoteAddr)
 }
@@ -204,38 +227,57 @@ func eventsHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "SSE unsupported", 500)
 		return
 	}
+
+	// Create a unique channel for this client
+	clientCh := make(chan []byte, 256)
+
+	// Register this client in the global clients map
+	clientsMutex.Lock()
+	clients[clientCh] = true
+	clientsMutex.Unlock()
+
+	// Send the current clipboard content to the new client if available
+	if lastItem.Text != "" {
+		data, _ := json.Marshal(lastItem)
+		select {
+		case clientCh <- data:
+			log.Printf("EVENTS: Sent current clipboard content to new client %s", r.RemoteAddr)
+		default:
+			log.Printf("EVENTS: Failed to send current clipboard content to new client %s", r.RemoteAddr)
+		}
+	}
+
 	flusher.Flush()
 	log.Printf("EVENTS: SSE headers set and flushed for client %s", r.RemoteAddr)
 
-	clientCh := make(chan []byte, 256) // Increased buffer size to reduce message drops
+	// Start a goroutine to handle sending messages to this client
 	go func() {
 		log.Printf("EVENTS: Starting SSE message relay goroutine for client %s", r.RemoteAddr)
-		for msg := range sseCh {
-			log.Printf("EVENTS: Received message from global SSE channel: %s", string(msg))
+		for {
 			select {
-			case clientCh <- msg:
-				log.Printf("EVENTS: Successfully queued message to client channel for %s", r.RemoteAddr)
+			case msg := <-clientCh:
+				log.Printf("EVENTS: Sending message to client %s: %s", r.RemoteAddr, string(msg))
+				fmt.Fprintf(w, "data: %s\n\n", msg)
+				flusher.Flush()
+				log.Printf("EVENTS: Message flushed to client %s", r.RemoteAddr)
 			case <-ctx.Done():
-				log.Printf("EVENTS: Context cancelled, exiting relay goroutine for client %s", r.RemoteAddr)
+				log.Printf("EVENTS: Context cancelled for client %s, connection closed", r.RemoteAddr)
+				// Unregister client when connection is closed
+				clientsMutex.Lock()
+				delete(clients, clientCh)
+				clientsMutex.Unlock()
+				log.Printf("EVENTS: Client %s unregistered from global client list", r.RemoteAddr)
 				return
-			default:
-				log.Printf("EVENTS: Client channel full, dropping message for %s", r.RemoteAddr)
 			}
 		}
-		log.Printf("EVENTS: SSE message relay goroutine ending for client %s", r.RemoteAddr)
 	}()
 
-	log.Printf("EVENTS: Starting SSE message loop for client %s", r.RemoteAddr)
+	// Keep the connection alive and listen for broadcast messages
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("EVENTS: Context cancelled for client %s, connection closed", r.RemoteAddr)
+			log.Printf("EVENTS: Context cancelled for client %s", r.RemoteAddr)
 			return
-		case msg := <-clientCh:
-			log.Printf("EVENTS: Sending message to client %s: %s", r.RemoteAddr, string(msg))
-			fmt.Fprintf(w, "data: %s\n\n", msg)
-			flusher.Flush()
-			log.Printf("EVENTS: Message flushed to client %s", r.RemoteAddr)
 		}
 	}
 }
