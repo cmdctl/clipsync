@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"embed"
 	"encoding/json"
 	"fmt"
 	"html/template"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -84,6 +86,12 @@ func runServer(addr string) {
 
 	mux := http.NewServeMux()
 
+	// ✅ Properly serve static files from embedded folders
+	cssSub, _ := fs.Sub(cssFiles, "public/css")
+	jsSub, _ := fs.Sub(jsFiles, "public/js")
+	mux.Handle("/css/", http.StripPrefix("/css/", http.FileServer(http.FS(cssSub))))
+	mux.Handle("/js/", http.StripPrefix("/js/", http.FileServer(http.FS(jsSub))))
+
 	mux.HandleFunc("/login", loginHandler)
 	mux.HandleFunc("/logout", logoutHandler)
 
@@ -157,7 +165,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	io.WriteString(w, loginPage)
+	io.WriteString(w, getLoginPage())
 }
 
 func logoutHandler(w http.ResponseWriter, r *http.Request) {
@@ -421,115 +429,32 @@ func setClipboardText(s string) error {
 	return fmt.Errorf("no clipboard backend found")
 }
 
-// ======================= WEB PAGES =======================
+//go:embed public/login.html
+var loginFile embed.FS
 
-const loginPage = `
-<!doctype html>
-<html>
-	<head>
-	<meta charset="utf-8"/>
-	<meta name="viewport" content="width=device-width,initial-scale=1"/>
-	<meta name="theme-color" content="#000000">
-	<meta name="apple-mobile-web-app-capable" content="yes">
-	<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>ClipSync Login</title>
-<style>
-body{font-family:'Fira Code',monospace;background:#000;color:#0f0;display:flex;align-items:center;justify-content:center;height:100vh;}
-form{background:#000;border:1px solid #0f0;padding:20px;border-radius:10px;box-shadow:0 0 15px #0f0;}
-input,button{font-family:'Fira Code',monospace;background:#000;color:#0f0;border:1px solid #0f0;border-radius:5px;padding:10px;margin-top:5px}
-button:hover{background:#0f0;color:#000;cursor:pointer}
-h3{margin-bottom:10px}
-</style></head>
-<body>
-<form method="post">
-<h3>🔐 ClipSync Login</h3>
-<input type="password" name="password" placeholder="Password" required autofocus>
-<button type="submit">Login</button>
-</form>
-</body></html>
-`
+//go:embed public/index.html
+var indexFile embed.FS
 
-var pageTmpl = template.Must(template.New("page").Parse(`<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
-<meta name="theme-color" content="#000000">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>ClipSync Terminal</title>
-<style>
-body{background:#000;color:#0f0;font-family:'Fira Code',monospace;margin:0;padding:20px;}
-h2{color:#0f0;}
-	button{width: 100%;font-family:'Fira Code',monospace;background:#000;color:#0f0;border:1px solid #0f0;border-radius:5px;padding:8px 14px;margin-top:6px}
-button:hover{background:#0f0;color:#000;cursor:pointer}
-pre{white-space:pre-wrap;word-break:break-word;background:#000;padding:10px;border:1px solid #0f0;border-radius:5px;box-shadow:0 0 8px #0f0;}
-a{color:#0f0;text-decoration:none}
-a:hover{text-decoration:underline}
-.blink{animation:blink 1s steps(2,start) infinite}
-@keyframes blink{to{visibility:hidden}}
-</style>
-</head>
-<body>
-<div style="display:flex;justify-content:space-between;align-items:center;">
-<h2>🖥️ ClipSync <span class="blink">█</span></h2>
-<a href="/logout"><button>logout</button></a>
-</div>
+//go:embed public/css/*
+var cssFiles embed.FS
 
-	<div style="margin:15px 0; display: flex; justify-content: space-between; gap: 20px;">
-<button onclick="pasteFromClipboard()">📥 Paste from Clipboard</button>
-<button onclick="copyCurrent()">📋 Copy current text</button>
-</div>
+//go:embed public/js/*
+var jsFiles embed.FS
 
-<h3>Current clipboard:</h3>
-<pre id="current">(empty)</pre>
+var pageTmpl = template.Must(template.New("page").Parse(getIndexContent()))
 
-<script>
-async function pasteFromClipboard(){
-  try{
-    let text="";
-    if(navigator.clipboard && navigator.clipboard.readText){
-      text=await navigator.clipboard.readText();
-    }else{
-      text=prompt("Clipboard API unavailable.\\nPaste text manually:");
-      if(text){
-        // update UI immediately for prompt-based paste
-        document.getElementById("current").textContent=text;
-      }
-    }
-    if(!text)return;
-    await fetch("/api/set",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text})});
-    document.getElementById("current").textContent=text;
-  }catch(e){alert("Clipboard read failed: "+e);}
+func getIndexContent() string {
+	content, err := indexFile.ReadFile("public/index.html")
+	if err != nil {
+		log.Fatalf("Failed to read index.html: %v", err)
+	}
+	return string(content)
 }
 
-async function copyCurrent(){
-  const t=document.getElementById("current").textContent;
-  if(!t)return;
-  try{
-    if(navigator.clipboard && navigator.clipboard.writeText){
-      await navigator.clipboard.writeText(t);
-    }else{
-      const area=document.createElement("textarea");
-      area.value=t;document.body.appendChild(area);area.select();
-      document.execCommand("copy");
-      document.body.removeChild(area);
-    }
-    alert("Copied to clipboard!");
-  }catch(e){alert("Copy failed: "+e);}
+func getLoginPage() string {
+	content, err := loginFile.ReadFile("public/login.html")
+	if err != nil {
+		log.Fatalf("Failed to read login.html: %v", err)
+	}
+	return string(content)
 }
-
-async function getLatest(){
-  const r=await fetch("/api/get");const d=await r.json();
-  document.getElementById("current").textContent=d.text||"(empty)";
-}
-function connectSSE(){
-  const es=new EventSource("/events");
-  es.onmessage=(e)=>{try{const d=JSON.parse(e.data);
-    document.getElementById("current").textContent=d.text;}catch(_){}}; 
-  es.onerror=()=>setTimeout(connectSSE,2000);
-}
-getLatest();connectSSE();
-</script>
-</body>
-</html>`))

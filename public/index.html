@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#000000" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta
+      name="apple-mobile-web-app-status-bar-style"
+      content="black-translucent"
+    />
+    <title>ClipSync Terminal</title>
+    <link rel="stylesheet" href="/css/style.css" />
+  </head>
+  <body>
+    <div
+      style="display: flex; justify-content: space-between; align-items: center"
+    >
+      <h2>🖥️ ClipSync <span class="blink">█</span></h2>
+      <a href="/logout"><button>logout</button></a>
+    </div>
+
+    <div
+      style="
+        margin: 15px 0;
+        display: flex;
+        justify-content: space-between;
+        gap: 20px;
+      "
+    >
+      <button onclick="pasteFromClipboard()">📥 Paste from Clipboard</button>
+      <button onclick="copyCurrent()">📋 Copy current text</button>
+    </div>
+
+    <h3>Current clipboard:</h3>
+    <pre id="current">(empty)</pre>
+
+    <script src="/js/app.js"></script>
+  </body>
+</html>
+
